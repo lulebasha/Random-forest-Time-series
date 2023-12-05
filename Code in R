@@ -1,0 +1,343 @@
+library(dygraphs)
+library(xts)      # To make the convertion data-frame / xts format
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(magrittr)
+library(randomForest)
+library(randomForestExplainer)
+library(caTools)
+library(rpart)
+library(caret)
+library(e1071)
+library(Metrics)
+library(ggRandomForests)
+library(randomForestSRC)
+library(forecast)
+library("RColorBrewer") # Nice color palettes
+library("plot3D") # for 3d surfaces.
+library("dplyr") # Better data manipulations
+library("parallel")# mclapply for multicore processing
+library(performance)
+
+indeuro=read.csv(file.choose(),header = TRUE) #import the dataset
+date<- dmy(indeuro$Time) #convert the time column in the format date
+head(date)
+indeuro$Year <- year(indeuro$Time)
+indeuro$Month <- month(indeuro$Time)
+indeuro$Day <- day(indeuro$Time)
+
+
+
+#interactive graph for exchange rate EURO/LEKE
+# Figure . 1 Monthly average foreign currency Euro to ALL exchange rate
+don <- xts(x = indeuro$Euro, order.by = date)
+dygraph(don) %>%
+  dyOptions(labelsUTC = TRUE, fillGraph=TRUE, fillAlpha=0.1, drawGrid = FALSE, colors=c("blue")) %>%
+  dyRangeSelector() %>%
+  dyCrosshair(direction = "vertical") %>%
+  dyHighlight(highlightCircleSize = 5, highlightSeriesBackgroundAlpha = 0.2, hideOnMouseOut = FALSE)  %>%
+  dyRoller(rollPeriod = 1)
+
+
+# TABLE I  SUMMARY STATISTICS OF THE VARIABLES
+ind=indeuro[,2:9]#remove the first column which is time, and take a
+#dataframe only with the variables 
+summary(ind)
+sd(ind$Euro)
+sd(ind$MB)
+sd(ind$CODC)
+sd(ind$AM3)
+sd(ind$CPI)
+sd(ind$GED)
+sd(ind$BP)
+sd(ind$GDP)
+skewness(ind$Euro)
+skewness(ind$MB)
+skewness(ind$CODC)
+skewness(ind$AM3)
+skewness(ind$CPI)
+skewness(ind$GED)
+skewness(ind$BP)
+skewness(ind$GDP)
+kurtosis(ind$Euro)
+kurtosis(ind$MB)
+kurtosis(ind$CODC)
+kurtosis(ind$AM3)
+kurtosis(ind$CPI)
+kurtosis(ind$GED)
+kurtosis(ind$BP)
+kurtosis(ind$GDP)
+
+
+
+
+
+
+######################################################
+###############    PART1    ##########################
+#SEE Fig. 3 The flow diagram of random forest model ##
+########################################################
+
+#RANDOM FOREST MODEL FOR EURO, first stage, without tune of the parameters, 
+#but the default parameters of the R function
+ind=indeuro[,2:9]#remove the first column which is time, and take a
+#dataframe only with the variables 
+sample = sample.split(ind$Euro, SplitRatio = .75) 
+#split the data in 75% and 25%
+train = subset(ind, sample == TRUE)
+test  = subset(ind, sample == FALSE)
+dim(train)
+dim(test)
+set.seed(1000)
+rf <- randomForest(Euro ~.,data=ind,importance = TRUE, proximity=TRUE)
+predTrain = predict(rf, train)
+cmTrain = table(predTrain, train$Euro)
+predTest <- predict(rf, test)
+cmTest = table(predTest, test$Euro)
+rf # call the model to see the results
+importance(rf) #matric of variable importance
+varImpPlot(rf) #graphical presentation of variable importance
+#Print some of variable accurancy such as MAE, MSE and R2
+print(paste0('MAE: ' , mae(test$Euro,predTest) ))
+print(paste0('MSE: ' ,caret::postResample(predTest , test$Euro)['RMSE']^2 ))
+print(paste0('R2: ' ,caret::postResample(predTest , test$Euro)['Rsquared'] ))
+
+#Graph of predicted versus actual values
+ggplot(  ) + 
+  geom_point( aes(x = test$CPI, y = test$Euro, color = 'red', alpha = 1) ) + 
+  geom_point( aes(x = test$CPI , y = predTest, color = 'blue',  alpha = 1)) + 
+  labs(x = "CPI", y = "Euro", color = "", alpha = 'Transperency') +
+  scale_color_manual(labels = c( "Predicted", "Real"), values = c("blue", "red")) 
+
+
+#Figure 5 Tune of the parameters 
+N=121 #length(train)
+X_train_ = train[1:N,1:8]
+y_train_ = train$Euro[1:N]
+seed <-7
+metric<-'RMSE'
+customRF <- list(type = "Regression", library = "randomForest", loop = NULL)
+customRF$parameters <- data.frame(parameter = c("maxnodes", "ntree"), class = rep("numeric", 2), 
+                                  label = c("maxnodes", "ntree"))
+customRF$grid <- function(x, y, len = NULL, search = "grid") {}
+customRF$fit <- function(x, y, wts, param, lev, last, weights, classProbs, ...) {
+  randomForest(x, y, maxnodes = param$maxnodes, ntree=param$ntree, ...)}
+customRF$predict <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+  predict(modelFit, newdata)
+customRF$prob <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+  predict(modelFit, newdata, type = "prob")
+customRF$sort <- function(x) x[order(x[,1]),]
+customRF$levels <- function(x) x$classes
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search='grid')
+tunegrid <- expand.grid(.maxnodes=c(70,80,90,100,110), .ntree=c(500,600,700,800,900, 1000))
+set.seed(seed)
+# Train the model
+rf_gridsearch <- train(x=X_train_, y=y_train_, method=customRF, metric=metric, tuneGrid=tunegrid, trControl=control)
+plot(rf_gridsearch)
+
+#Use the result from the model tuning, to build once again the Random 
+#Forest model
+rf_gridsearch$bestTune
+
+#Fig. 6 Variable importance plots
+varImpPlot(rf_gridsearch$finalModel, main ='Feature importance')
+rf <- randomForest(Euro ~.,data=ind,importance = TRUE, proximity=TRUE,maxnodes=110,  ntree=600)
+rf # call the model to see the results
+
+#Fig. 7 Distribution of minimal depth
+min_depth_frame <- min_depth_distribution(rf)
+save(min_depth_frame, file = "min_depth_frame.rda")
+load("min_depth_frame.rda")
+head(min_depth_frame, n = 10)
+plot_min_depth_distribution(min_depth_frame)
+
+
+#Fig. 8 Relation between measures
+plot_importance_rankings(measure_importance(rf))
+
+#Fig. 9 Multi-way importance plot 
+plot_multi_way_importance(measure_importance(rf))
+
+#TABLE II  VARIABLE IMPORTANCE
+measure_importance(rf)
+
+
+#######################################################
+###############    PART2    ###########################
+#SEE Fig.4 The flow diagram of final model    #########
+########################################################
+
+#Build the EXPONENTIAL SMOOTHING MODEL FOR ALL THE VARIABLES
+#Make prediction for 12 months
+
+
+
+#MB
+mb <- ts(indeuro$MB,start=c(2008,1),frequency =12)
+plot(mb)
+mbforecasts <- HoltWinters(mb)
+mbforecasts 
+mbforecasts$SSE
+plot(mbforecasts)
+mbforecasts2 <- forecast(mbforecasts, h=12)
+mbforecasts2
+plot(mbforecasts2,col="blue", lwd=2, cex.main=1,xlab="Months",main="Forecast of MB")
+
+
+#COCD
+codc <- ts(indeuro$CODC,start=c(2008,1),frequency =12)
+plot(codc )
+mbforecasts <- HoltWinters(codc)
+mbforecasts 
+mbforecasts$SSE
+plot(mbforecasts)
+codcforecasts <- forecast(mbforecasts, h=12)
+codcforecasts
+plot(codcforecasts,col="blue", lwd=2, cex.main=1,xlab="Months",main="Forecast of CODC")
+
+
+#AM3
+am <- ts(indeuro$AM3,start=c(2008,1),frequency =12)
+plot(am )
+mbforecasts <- HoltWinters(am)
+mbforecasts 
+mbforecasts$SSE
+plot(mbforecasts)
+amforecasts <- forecast(mbforecasts, h=12)
+amforecasts
+plot(amforecasts ,col="blue", lwd=2, cex.main=1,xlab="Months",main="Forecast of AM3")
+
+
+# CPI
+cpi<- ts(indeuro$CPI,start=c(2008,1),frequency =12)
+plot(cpi)
+mbforecasts <- HoltWinters(cpi)
+mbforecasts 
+mbforecasts$SSE
+plot(mbforecasts)
+cpiforecasts <- forecast(mbforecasts, h=12)
+cpiforecasts
+plot(cpiforecasts,col="blue", lwd=2, cex.main=1,xlab="Months",main="Forecast of CPI")
+
+#GED
+ged<- ts(indeuro$GED,start=c(2008,1),frequency =12)
+plot(ged)
+mbforecasts <- HoltWinters(ged)
+mbforecasts 
+mbforecasts$SSE
+plot(mbforecasts)
+gedforecasts <- forecast(mbforecasts, h=12)
+gedforecasts
+plot(gedforecasts,col="blue", lwd=2, cex.main=1,xlab="Months",main="Forecast of GED")
+
+
+#GDP
+gdp<- ts(indeuro$GDP,start=c(2008,1),frequency =12)
+plot(gdp)
+mbforecasts <- HoltWinters(gdp)
+mbforecasts 
+mbforecasts$SSE
+plot(mbforecasts)
+gdpforecasts <- forecast(mbforecasts, h=12)
+gdpforecasts
+plot(gdpforecasts,col="blue", lwd=2, cex.main=1,xlab="Months",main="Forecast of GDP")
+
+#Euro
+euro<- ts(indeuro$Euro,start=c(2008,1),frequency =12)
+plot(euro)
+mbforecasts <- HoltWinters(euro)
+mbforecasts 
+mbforecasts$SSE
+plot(mbforecasts)
+euroforecasts2 <- forecast(mbforecasts, h=12)
+euroforecasts2
+plot(euroforecasts2,col="blue", lwd=2, cex.main=1,xlab="Months",main="Forecast of MB")
+
+
+#All forecasted values 
+mb1=data.frame(mbforecasts2)
+MB=mb1$Point.Forecast
+codc1=data.frame(codcforecasts)
+CODC=codc1$Point.Forecast
+am1=data.frame(amforecasts)
+AM3=am1$Point.Forecast
+cpi1=data.frame(cpiforecasts)
+CPI=cpi1$Point.Forecast
+ged1=data.frame(gedforecasts)
+GED=ged1$Point.Forecast
+gdp1=data.frame(gdpforecasts)
+GDP=gdp1$Point.Forecast
+
+
+
+
+#Build the ARIMA MODEL FOR ALL THE VARIABLES
+#Make prediction for 12 months
+
+#MB
+mbforecasts <- auto.arima(mb)
+mbforecastarima<- forecast(mbforecasts, h=12)
+#COCD
+mbforecasts <- auto.arima(codc)
+codcforecastarima <- forecast(mbforecasts, h=12)
+#AM3
+mbforecasts <- auto.arima(am)
+amforecastarima <- forecast(mbforecasts, h=12)
+#CPI
+mbforecasts <- auto.arima(cpi)
+cpiforecastarima <- forecast(mbforecasts, h=12)
+#GED
+mbforecasts <- auto.arima(ged)
+gedforecastarima<- forecast(mbforecasts, h=12)
+#GDP
+mbforecasts <- auto.arima(gdp)
+gdpforecastarima <- forecast(mbforecasts, h=12)
+#Euro
+mbforecasts <-auto.arima(euro)
+euroforecastarima <- forecast(mbforecasts, h=12)
+
+#All forecasted values 
+mb2=data.frame(mbforecastarima)
+MB2=mb2$Point.Forecast
+codc2=data.frame(codcforecastarima)
+CODC2=codc2$Point.Forecast
+am2=data.frame(amforecastarima)
+AM32=am2$Point.Forecast
+cpi2=data.frame(cpiforecastarima)
+CPI2=cpi2$Point.Forecast
+ged2=data.frame(gedforecastarima)
+GED2=ged2$Point.Forecast
+gdp2=data.frame(gdpforecastarima)
+GDP2=gdp2$Point.Forecast
+euro2=data.frame(euroforecastarima)
+Euro2=euro2$Point.Forecast
+
+
+#Error for each model MSE, for ARIMA and ETS, for each variable
+#We compare them to find the best model for this variable
+#Because the forecasted values from this model will be used in random forest model
+mseeuro1=sum(((test$Euro-Euro)^2)/12)
+mseeuro2=sum(((test$Euro-Euro2)^2)/12) #smaller
+msemb1=sum(((test$MB-MB)^2)/12)
+msemb2=sum(((test$MB-MB2)^2)/12)   #smaller
+msecodc1=sum(((test$CODC-CODC)^2)/12)
+msecodc2=sum(((test$CODC-CODC2)^2)/12)   #smaller
+mseam1=sum(((test$AM3-AM3)^2)/12)    #smaller
+mseam2=sum(((test$AM3-AM32)^2)/12)
+msecpi1=sum(((test$CPI-CPI)^2)/12)
+msecpi2=sum(((test$CPI-CPI2)^2)/12)    #smaller
+mseged1=sum(((test$GED-GED)^2)/12)  #smaller
+mseged2=sum(((test$GED-GED2)^2)/12)
+msegdp1=sum(((test$GDP-GDP)^2)/12) #smaller
+msegdp2=sum(((test$GDP-GDP2)^2)/12)
+
+
+#create a dataframe to use in the Randomforest model with the forecasted values, 
+#after the best model has been selected 
+new=data.frame(MB2,CODC2,AM3,CPI2,GED,GDP) 
+
+#Use the created dataframe with prediction values, in RF model
+#Fig. 11 Forecast of Euro/Lek exchange rate
+#TABLE III.  PREDICTED VALUES
+pred_values=predict(rf,newdata = new)
